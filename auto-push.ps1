@@ -1,6 +1,6 @@
 param(
     [string]$RepoPath = $PSScriptRoot,
-    [int]$QuietSeconds = 2
+    [int]$PollSeconds = 3
 )
 
 Set-StrictMode -Version Latest
@@ -36,107 +36,41 @@ function Invoke-Git {
         [string[]]$Args
     )
 
-    & $script:GitExe -C $script:RepoPath @Args
+    $output = & $script:GitExe -C $script:RepoPath @Args 2>&1
     if ($LASTEXITCODE -ne 0) {
-        throw "Git command failed: git $($Args -join ' ')"
-    }
-}
-
-function Test-IgnoredPath {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-    $repoRoot = [System.IO.Path]::GetFullPath($script:RepoPath)
-
-    $relativePath = $fullPath.Substring($repoRoot.Length).TrimStart('\')
-    if (-not $relativePath) {
-        return $true
+        throw (($output | Out-String).Trim())
     }
 
-    $ignoredPrefixes = @(
-        ".git\",
-        "__pycache__\",
-        ".pytest_cache\",
-        ".venv\"
-    )
-
-    foreach ($prefix in $ignoredPrefixes) {
-        if ($relativePath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-            return $true
-        }
-    }
-
-    return $false
+    return $output
 }
 
 $script:RepoPath = [System.IO.Path]::GetFullPath($RepoPath)
 $script:GitExe = Get-GitExe
-$script:Pending = $false
-$script:LastEventTime = Get-Date
 
-Write-Host "Watching $script:RepoPath for changes..."
+Write-Host "Watching $script:RepoPath for git changes every $PollSeconds seconds..."
 Write-Host "Press Ctrl+C to stop."
 
-$watcher = New-Object System.IO.FileSystemWatcher
-$watcher.Path = $script:RepoPath
-$watcher.IncludeSubdirectories = $true
-$watcher.EnableRaisingEvents = $true
-$watcher.NotifyFilter = [System.IO.NotifyFilters]"FileName, DirectoryName, LastWrite"
+while ($true) {
+    Start-Sleep -Seconds $PollSeconds
 
-$action = {
-    $changedPath = $Event.SourceEventArgs.FullPath
-    if (-not (Test-IgnoredPath -Path $changedPath)) {
-        $script:Pending = $true
-        $script:LastEventTime = Get-Date
-    }
-}
-
-$subscriptions = @(
-    Register-ObjectEvent -InputObject $watcher -EventName Changed -Action $action,
-    Register-ObjectEvent -InputObject $watcher -EventName Created -Action $action,
-    Register-ObjectEvent -InputObject $watcher -EventName Deleted -Action $action,
-    Register-ObjectEvent -InputObject $watcher -EventName Renamed -Action $action
-)
-
-try {
-    while ($true) {
-        Start-Sleep -Seconds 1
-
-        if (-not $script:Pending) {
+    try {
+        $status = Invoke-Git -Args @("status", "--porcelain")
+        if (-not $status) {
             continue
         }
 
-        $elapsed = (Get-Date) - $script:LastEventTime
-        if ($elapsed.TotalSeconds -lt $QuietSeconds) {
+        Invoke-Git -Args @("add", "-A") | Out-Null
+
+        & $script:GitExe -C $script:RepoPath diff --cached --quiet
+        if ($LASTEXITCODE -eq 0) {
             continue
         }
 
-        $script:Pending = $false
-
-        try {
-            Invoke-Git -Args @("add", "-A")
-
-            & $script:GitExe -C $script:RepoPath diff --cached --quiet
-            if ($LASTEXITCODE -eq 0) {
-                continue
-            }
-
-            $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            Invoke-Git -Args @("commit", "-m", "Auto update $timestamp")
-            Invoke-Git -Args @("push")
-            Write-Host "Pushed changes at $timestamp"
-        } catch {
-            Write-Warning $_
-        }
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Invoke-Git -Args @("commit", "-m", "Auto update $timestamp") | Out-Null
+        Invoke-Git -Args @("push") | Out-Null
+        Write-Host "Pushed changes at $timestamp"
+    } catch {
+        Write-Warning $_
     }
-} finally {
-    foreach ($subscription in $subscriptions) {
-        Unregister-Event -SourceIdentifier $subscription.Name -ErrorAction SilentlyContinue
-        Remove-Job -Id $subscription.Id -Force -ErrorAction SilentlyContinue
-    }
-
-    $watcher.Dispose()
 }

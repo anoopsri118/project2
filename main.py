@@ -1,5 +1,5 @@
 def main() -> None:
-    print(2 + 2)
+    print(2 + 3)
 
 
 if __name__ == "__main__":
